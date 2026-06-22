@@ -16,6 +16,18 @@
 #include "Adafruit_BME680.h"
 #include <Adafruit_NeoPixel.h>
 #include <vector>
+#include <esp_sntp.h>
+#include <TelnetStream.h>
+
+// Optional: Create a logging macro to send output to both USB and Wi-Fi simultaneously
+#define LOG_PRINT(x)    { Serial.print(x); TelnetStream.print(x); }
+#define LOG_PRINTLN(x)  { Serial.println(x); TelnetStream.println(x); }
+#define LOG_PRINTF(...) { Serial.printf(__VA_ARGS__); TelnetStream.printf(__VA_ARGS__); }
+
+const char* ntpServer1 = "pool.ntp.org";
+const char* ntpServer2 = "time.nist.gov";
+const long  gmtOffset_sec = 0;
+const int   daylightOffset_sec = 0;
 
 // --- Hardware & Pin Definitions ---
 #define STATUS_LED 15
@@ -112,6 +124,27 @@ void showProgress(int cut) {
         strip.setPixelColor(NUM_PIXELS -i -1, i<=cut ? strip.Color(0, 255,0) : strip.Color(0, 0, 0));
     }            
     strip.show();
+}
+
+void waitProgress(int cut) {
+    Serial.print(".");
+    if (cut < 0) {
+        cut = 0;
+    }
+    if (cut >= NUM_PIXELS) {
+        cut = NUM_PIXELS -1;
+    }
+
+    strip.setPixelColor(NUM_PIXELS -cut -1, strip.Color(255, 255,0));
+    ledcWriteTone(PIN_BUZZER, cMajorGamma[cut % GAMMA_NOTES_COUNT]);
+    strip.show();
+    vTaskDelay(pdMS_TO_TICKS(100)); 
+    
+    strip.setPixelColor(NUM_PIXELS -cut -1, strip.Color(0, 0, 0));
+    strip.show();
+
+    ledcWriteTone(PIN_BUZZER, 0);
+    vTaskDelay(pdMS_TO_TICKS(2900)); 
 }
 
 void playStatusChord(bool isUp) {
@@ -213,6 +246,37 @@ void setupWebServer() {
         }
         server.send(200, "application/json", "{\"status\":\"success\", \"message\":\"Hope you had some fun!.\"}");
     });
+
+    //curl -X POST http://10.1.1.4:9980/api/play -d "freq=880&duration=1500"
+    server.on("/api/play", HTTP_POST, []() {
+        // 1. Validate parameters exist
+        if (!server.hasArg("freq") || !server.hasArg("duration")) {
+            server.send(400, "application/json", "{\"status\":\"error\", \"message\":\"Missing 'freq' or 'duration'\"}");
+            return;
+        }
+
+        // 2. Parse to integers
+        int freq = server.arg("freq").toInt();
+        int duration = server.arg("duration").toInt();
+
+        // 3. Sanity checks
+        if (freq <= 0 || duration <= 0) {
+            server.send(400, "application/json", "{\"status\":\"error\", \"message\":\"Values must be greater than 0\"}");
+            return;
+        }
+
+        // 4. Clamp duration to a maximum of 1000ms
+        if (duration > 1000) {
+            duration = 1000;
+        }
+
+        // 5. Fire the asynchronous beep
+        beepAsync(freq, duration);
+                
+        server.send(200, "application/json", "{\"status\":\"success\", \"message\":\"Hope you had some fun!.\"}");
+    });
+
+
 
     server.begin();
 }
@@ -409,13 +473,63 @@ void otaTask(void *pvParameters) {
     }
 }
 
+void performHourlyAction() {
+    ledcWriteTone(PIN_BUZZER, 2048);
+    delay(60); 
+    ledcWriteTone(PIN_BUZZER, 0);
+    LOG_PRINTLN("hourly action fired!");
+}
+
+// FreeRTOS Task for async execution
+void hourlyTask(void *pvParameters) {
+  vTaskDelay(10000 / portTICK_PERIOD_MS);
+
+  for(;;) {
+    struct tm timeinfo;
+    
+    // If time isn't set yet, wait 1 second and check again
+    if (!getLocalTime(&timeinfo)) {
+      vTaskDelay(1000 / portTICK_PERIOD_MS);
+      LOG_PRINTLN("HA: Can't get time on tick");
+      continue;
+    }
+
+    // Calculate exactly how many seconds remain until the next xx:00:00
+    uint32_t seconds_until_next = ((59 - timeinfo.tm_min) * 60) + (60 - timeinfo.tm_sec);
+
+    if (timeinfo.tm_min == 0 &&  timeinfo.tm_sec == 0) {
+      // It is exactly the top of the hour. Execute.
+      performHourlyAction();
+      
+      // Sleep for 2 seconds to completely bypass the 00:00:00 window
+      // preventing any double-executions.
+      vTaskDelay(2000 / portTICK_PERIOD_MS); 
+    } else {
+      // To account for NTP adjusting the clock while we sleep, we don't sleep 
+      // for the entire duration. We sleep until 2 seconds *before* the target.
+      uint32_t sleep_time_ms = 20; // default to 20ms polling when very close
+      
+      if (seconds_until_next > 180) {
+        seconds_until_next = 180;
+      }
+
+      if (seconds_until_next > 2) {
+        sleep_time_ms = (seconds_until_next - 2) * 1000;
+      }
+      
+      // Asynchronously yield the CPU 
+      vTaskDelay(sleep_time_ms / portTICK_PERIOD_MS);
+    }
+  }
+}
+
 // --- Main Setup ---
 void setup() {
     Serial.begin(115200);
     strip.begin();
     strip.clear();
     strip.show();
-    
+
     buzzerTimer = xTimerCreate(
         "BuzzerTimer",         // Internal name
         pdMS_TO_TICKS(180),    // Default duration
@@ -434,7 +548,7 @@ void setup() {
     pinMode(STATUS_LED, OUTPUT);
     ledOn();
     showProgress(0);
-
+    
     // watchdog
     esp_task_wdt_config_t twdt_config = {
         .timeout_ms = WDT_TIMEOUT_S * 1000,
@@ -444,15 +558,14 @@ void setup() {
     esp_task_wdt_reconfigure(&twdt_config);
     esp_task_wdt_add(NULL);
     showProgress(1);
-
+    
     // wifi
     WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) {
-        ledcWriteTone(PIN_BUZZER, cMajorGamma[3]);
-        delay(100); 
-        ledcWriteTone(PIN_BUZZER, 0);
-        delay(2900);
+        waitProgress(2);
     }
+    Serial.printf("\nWiFi Connected. IP: %s\n", WiFi.localIP().toString().c_str());
+    TelnetStream.begin();
     esp_task_wdt_reset(); 
     showProgress(2);
 
@@ -521,6 +634,18 @@ void setup() {
         }
     }
     xSemaphoreGive(configMutex);
+
+    // NTP time sync
+    sntp_set_sync_interval(900 * 1000);
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer1, ntpServer2);
+
+    struct tm timeinfo;
+    LOG_PRINTLN("Waiting for NTP sync");
+    while (!getLocalTime(&timeinfo)) {
+        waitProgress(4);
+    }
+
+    esp_task_wdt_reset();
     showProgress(4);
 
     // bme
@@ -529,10 +654,7 @@ void setup() {
         playStatusChord(false);
         delay(500); // Let the chord finish
         while(true) {
-            ledcWriteTone(PIN_BUZZER, cMajorGamma[3]);
-            delay(100); 
-            ledcWriteTone(PIN_BUZZER, 0);
-            delay(2900);
+            waitProgress(5);
         }
     }
 
@@ -542,20 +664,28 @@ void setup() {
     bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
     bme.setGasHeater(320, 150); 
     showProgress(5);
-    
-    setupWebServer();
-    showProgress(6);
-
+        
 
     // tasks 2
     xTaskCreate(motorTask,  "MotorTask",  2048, NULL, 1, NULL);
     xTaskCreate(pingTask,   "PingTask",   4096, NULL, 1, NULL);
     xTaskCreate(ledTask,    "LEDTask",    4096, NULL, 1, NULL);
     xTaskCreate(serverTask, "ServerTask", 4096, NULL, 1, NULL);
+    xTaskCreate(
+        hourlyTask,     // Function to implement the task
+        "HourlyTask",   // Name of the task
+        4096,           // Stack size in words
+        NULL,           // Task input parameter
+        1,              // Priority of the task
+        NULL           // Task handle
+    );
 
     ledOn();
     esp_task_wdt_reset();
     showProgress(7);
+    
+    setupWebServer();
+    showProgress(8);
 }
 
 // --- Main Loop ---
@@ -627,6 +757,7 @@ void loop() {
     udp.endPacket();
     
     ledOff();
+    LOG_PRINTF("tick %d temp: %f\n", cycle, bme.temperature);
     esp_task_wdt_reset(); 
  
     vTaskDelay(pdMS_TO_TICKS(3000)); 
