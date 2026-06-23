@@ -1,2 +1,4 @@
 # rotatotron
-Very custom esp32 project: automatic watch winder with embedded weater station and network nodes monitoring, neopixel and buzzer indication.
+ESP32 home hub in a watch winder case: network nodes health, temperature, humidity and more
+[Video demo](https://youtu.be/G_cHKdDZcKs)
+[Winder machine base on Aliexpress](https://a.aliexpress.com/_EHprQzc)
