@@ -73,6 +73,7 @@ volatile float currentTemp = 0.0;
 volatile bool prepareForFlash = false; // Flash-mode safety flag
 volatile bool isBroken = false;
 bool wasBroken = false; 
+volatile bool isAnyDown = false;
 
 // LAN Core Services State (Dynamic)
 std::vector<IPAddress> coreServices;
@@ -81,11 +82,17 @@ volatile bool initialScanComplete = false;
 
 int GAMMA_NOTES_COUNT = 8;
 int cMajorGamma[] = {523, 587, 659, 698, 784, 880, 988, 1047};
-
+             //      0C   1D   2E   3F   4G   5A   6B   7C 
 TimerHandle_t buzzerTimer;
 
 enum MotorState {
     STATE_DUMMY
+};
+
+enum MotorRotate {
+    ROTATE_LEFT,
+    ROTATE_RIGHT,
+    ROTATE_IDLE
 };
 
 struct ColorPoint { float temp; uint8_t r, g, b; };
@@ -156,9 +163,9 @@ void playStatusChord(bool isUp) {
     if (prepareForFlash) return; 
     
     int indicesUp[]   = {0, 2, 4};       
-    int indicesDown[] = {5, 3, 1, 0, 0}; 
+    int indicesDown[] = {6, 3, 1}; 
     
-    for(int i = 0; i < (isUp ? 3 : 5); i++) {
+    for(int i = 0; i < 3; i++) {
         if (prepareForFlash) break; 
         int targetFreq = cMajorGamma[isUp ? indicesUp[i] : indicesDown[i]];
         ledcWriteTone(PIN_BUZZER, targetFreq);
@@ -345,7 +352,10 @@ void pingTask(void *pvParameters) {
             }
             xSemaphoreGive(configMutex);
 
-            if (triggerChord) playStatusChord(chordType);
+            if (triggerChord) {
+                playStatusChord(chordType);
+                isAnyDown = !chordType;
+            }
             vTaskDelay(pdMS_TO_TICKS(1000)); 
         } else {
             vTaskDelay(pdMS_TO_TICKS(5000));
@@ -402,7 +412,7 @@ void ledTask(void *pvParameters) {
                 getTemperatureRGB(smoothTemp, baseR, baseG, baseB);
 
                 for (int i = 0; i < NUM_PIXELS; i++) {
-                    float val = sin((float)i * 0.32 + phase);
+                    float val = sin((float)i * 0.32 + phase) - 0.25; //  mute a bit and add asymmetry 
                     if (val > 1.0) val = 1.0;
                     if (val < -1.0) val = -1.0;  
                     float brightness = (val + 1.0) / 2.0; 
@@ -443,6 +453,31 @@ void ledTask(void *pvParameters) {
     }
 }
 
+bool isMotorPanic() {
+    return isBroken || isAnyDown;
+}
+
+void motorRegularOrPanicWait(int regularWaitMs) {
+    int waitChunkMs = 500;
+    //  check for panic during the wait
+    int chunkCount = regularWaitMs / waitChunkMs;
+    vTaskDelay(pdMS_TO_TICKS(waitChunkMs));
+    while (chunkCount --> 0 && !isMotorPanic()) {
+        vTaskDelay(pdMS_TO_TICKS(waitChunkMs));
+    }
+    
+}
+
+void motorRotate(MotorRotate mode) {
+    if (mode == ROTATE_LEFT) {
+        digitalWrite(PIN_RIGHT, LOW); digitalWrite(PIN_LEFT, HIGH); 
+    } else if (mode == ROTATE_RIGHT) {
+        digitalWrite(PIN_RIGHT, HIGH); digitalWrite(PIN_LEFT, LOW); 
+    } else {
+        digitalWrite(PIN_RIGHT, LOW); digitalWrite(PIN_LEFT, LOW); 
+    }
+}
+
 void motorTask(void *pvParameters) {
     MotorState currentState = STATE_DUMMY; 
     MotorState incomingState;
@@ -450,19 +485,30 @@ void motorTask(void *pvParameters) {
     for (;;) {
         if (prepareForFlash) vTaskSuspend(NULL); 
 
-        digitalWrite(PIN_RIGHT, HIGH); digitalWrite(PIN_LEFT, LOW); 
-        vTaskDelay(pdMS_TO_TICKS(3000)); 
-        digitalWrite(PIN_RIGHT, LOW); digitalWrite(PIN_LEFT, HIGH); 
-        vTaskDelay(pdMS_TO_TICKS(20000)); 
-        digitalWrite(PIN_RIGHT, LOW); digitalWrite(PIN_LEFT, LOW); 
-        vTaskDelay(pdMS_TO_TICKS(90000)); 
+        if (isMotorPanic()) {
+            motorRotate(ROTATE_RIGHT);
+            motorRegularOrPanicWait(0); 
+            motorRotate(ROTATE_IDLE);
+            motorRegularOrPanicWait(0);
+        } else {
+            motorRotate(ROTATE_RIGHT);
+            motorRegularOrPanicWait(3000); 
+            motorRotate(ROTATE_LEFT);
+            motorRegularOrPanicWait(20000); 
+            motorRotate(ROTATE_RIGHT);
+            motorRegularOrPanicWait(3000); 
+            motorRotate(ROTATE_IDLE);
+            motorRegularOrPanicWait(90000); 
 
-        digitalWrite(PIN_RIGHT, LOW); digitalWrite(PIN_LEFT, HIGH); 
-        vTaskDelay(pdMS_TO_TICKS(3000)); 
-        digitalWrite(PIN_RIGHT, HIGH); digitalWrite(PIN_LEFT, LOW); 
-        vTaskDelay(pdMS_TO_TICKS(20000)); 
-        digitalWrite(PIN_RIGHT, LOW); digitalWrite(PIN_LEFT, LOW); 
-        vTaskDelay(pdMS_TO_TICKS(90000)); 
+            motorRotate(ROTATE_LEFT);
+            motorRegularOrPanicWait(3000); 
+            motorRotate(ROTATE_RIGHT);
+            motorRegularOrPanicWait(20000); 
+            motorRotate(ROTATE_LEFT);
+            motorRegularOrPanicWait(3000); 
+            motorRotate(ROTATE_IDLE);
+            motorRegularOrPanicWait(90000);
+        } 
     }
 }
 
