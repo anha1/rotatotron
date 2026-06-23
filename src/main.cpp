@@ -19,7 +19,9 @@
 #include <esp_sntp.h>
 #include <TelnetStream.h>
 
-// Optional: Create a logging macro to send output to both USB and Wi-Fi simultaneously
+#include "secrets.h" // Local credentials (ignored by Git)
+
+// a logging macro to send output to both USB and Wi-Fi simultaneously
 #define LOG_PRINT(x)    { Serial.print(x); TelnetStream.print(x); }
 #define LOG_PRINTLN(x)  { Serial.println(x); TelnetStream.println(x); }
 #define LOG_PRINTF(...) { Serial.printf(__VA_ARGS__); TelnetStream.printf(__VA_ARGS__); }
@@ -42,13 +44,17 @@ const int BME_MISO  = 20;
 
 const int PIN_NEOPIXELS = 1; 
 const int PIN_BUZZER    = 0; 
-const int NUM_PIXELS    = 9;
+const int NUM_PIXELS    = 22;
+const int LOGICAL_STEPS = 9;
 
 // --- Network & Configuration ---
-const char* ssid       = "mywifinet";
-const char* password   = "mywifipass";
+const char* ssid       = WIFI_SSID;
+const char* wifi_password   = WIFI_PASSWORD;
+
+const char* firmware_upload_password = "YOUR_PASSWORD_HERE";  // keep in sync with platformio.ini
 const char* statsd_ip  = "10.1.1.1";
 const int statsd_port  = 8125;
+
 
 // --- Global Objects & Variables ---
 WiFiUDP udp;
@@ -75,7 +81,6 @@ volatile bool initialScanComplete = false;
 
 int GAMMA_NOTES_COUNT = 8;
 int cMajorGamma[] = {523, 587, 659, 698, 784, 880, 988, 1047};
-// Notes:            C5   D5   E5   F5   G5   A5   B5   C6
 
 TimerHandle_t buzzerTimer;
 
@@ -85,12 +90,11 @@ enum MotorState {
 
 struct ColorPoint { float temp; uint8_t r, g, b; };
 ColorPoint palette[] = {
-    {10.0, 0, 0, 255},       // Deep Blue
-    {15.0, 0, 255, 255},     // Cyan
-    {20.0, 255, 105, 180},   // Pink
-    {25.0, 255, 0, 0},       // Red
-    {30.0, 255, 165, 0},     // Orange
-    {40.0, 255, 255, 0}      // Yellow
+    {15.0, 0, 0, 255},       // Deep Blue
+    {20.0, 0, 255, 255},     // Cyan
+    {25.0, 255, 0, 176},     // Pink
+    {30.0, 255, 44, 0},      // Orange
+    {35.0, 255, 255, 0}      // Yellow
 };
 
 // --- Helper Functions ---
@@ -103,44 +107,45 @@ void buzzerStopCallback(TimerHandle_t xTimer) {
 void beepAsync(int freq, int durationMs) {
     if (prepareForFlash) return; 
     
-    ledcWriteTone(PIN_BUZZER, freq); // 1. Start the sound immediately
-    
-    // 2. Set the stopwatch duration and start it. 
-    // (A wait time of 0 means don't block if the timer queue is full)
+    ledcWriteTone(PIN_BUZZER, freq); 
     xTimerChangePeriod(buzzerTimer, pdMS_TO_TICKS(durationMs), 0); 
 }
 
+void getSection(int cut, int &startIdx, int &endIdx) {
+    if (cut < 0) cut = 0;
+    if (cut >= LOGICAL_STEPS) cut = LOGICAL_STEPS - 1;
+    
+    startIdx = (cut * NUM_PIXELS) / LOGICAL_STEPS;
+    endIdx = ((cut + 1) * NUM_PIXELS) / LOGICAL_STEPS - 1;
+}
+
 void showProgress(int cut) {
-    if (cut < 0) {
-        cut = 0;
-    }
-    if (cut >= NUM_PIXELS) {
-        cut = NUM_PIXELS -1;
-    }
+    int startIdx, endIdx;
+    getSection(cut, startIdx, endIdx);
 
     beepAsync(cMajorGamma[cut % GAMMA_NOTES_COUNT], 100);
 
     for (int i = 0; i < NUM_PIXELS; i++) {
-        strip.setPixelColor(NUM_PIXELS -i -1, i<=cut ? strip.Color(0, 255,0) : strip.Color(0, 0, 0));
+        strip.setPixelColor(NUM_PIXELS - i - 1, i <= endIdx ? strip.Color(0, 255, 0) : strip.Color(0, 0, 0));
     }            
     strip.show();
 }
 
 void waitProgress(int cut) {
     Serial.print(".");
-    if (cut < 0) {
-        cut = 0;
-    }
-    if (cut >= NUM_PIXELS) {
-        cut = NUM_PIXELS -1;
-    }
+    int startIdx, endIdx;
+    getSection(cut, startIdx, endIdx);
 
-    strip.setPixelColor(NUM_PIXELS -cut -1, strip.Color(255, 255,0));
+    for(int i = startIdx; i <= endIdx; i++) {
+        strip.setPixelColor(NUM_PIXELS - i - 1, strip.Color(255, 255, 0));
+    }
     ledcWriteTone(PIN_BUZZER, cMajorGamma[cut % GAMMA_NOTES_COUNT]);
     strip.show();
     vTaskDelay(pdMS_TO_TICKS(100)); 
     
-    strip.setPixelColor(NUM_PIXELS -cut -1, strip.Color(0, 0, 0));
+    for(int i = startIdx; i <= endIdx; i++) {
+        strip.setPixelColor(NUM_PIXELS - i - 1, strip.Color(0, 0, 0));
+    }
     strip.show();
 
     ledcWriteTone(PIN_BUZZER, 0);
@@ -148,21 +153,29 @@ void waitProgress(int cut) {
 }
 
 void playStatusChord(bool isUp) {
-    if (prepareForFlash) return; // Abort if flashing
+    if (prepareForFlash) return; 
     
-    int indicesUp[]   = {0, 2, 4};       // C5, E5, G5 (Ascending Major)
-    int indicesDown[] = {5, 3, 1, 0, 0}; // A5, F5, D5, C5, C5 (Descending/Failure)
+    int indicesUp[]   = {0, 2, 4};       
+    int indicesDown[] = {5, 3, 1, 0, 0}; 
     
     for(int i = 0; i < (isUp ? 3 : 5); i++) {
         if (prepareForFlash) break; 
-        
-        // Grab the note frequency from the gamma array using the index
         int targetFreq = cMajorGamma[isUp ? indicesUp[i] : indicesDown[i]];
-        
         ledcWriteTone(PIN_BUZZER, targetFreq);
         vTaskDelay(pdMS_TO_TICKS(180)); 
     }
     ledcWriteTone(PIN_BUZZER, 0);
+}
+
+void performHourlyAction() {
+    ledcWriteTone(PIN_BUZZER, 2048);
+    delay(160); 
+    ledcWriteTone(PIN_BUZZER, 0);
+    delay(80); 
+    ledcWriteTone(PIN_BUZZER, 2048);
+    delay(80); 
+    ledcWriteTone(PIN_BUZZER, 0);
+    LOG_PRINTLN("hourly action fired!");
 }
 
 void getTemperatureRGB(float t, uint8_t &r, uint8_t &g, uint8_t &b) {
@@ -182,9 +195,8 @@ void getTemperatureRGB(float t, uint8_t &r, uint8_t &g, uint8_t &b) {
     r = 0; g = 0; b = 0;
 }
 
-// --- API Endpoint Setup ---
+// --- Web Server Setup ---
 void setupWebServer() {
-    // curl -X POST http://10.1.1.4:9980/api/ips -H "Content-Type: application/json" -d '{"ips": ["10.1.1.1", "10.1.1.8", "10.1.1.9", "10.1.1.7"]}'
     server.on("/api/ips", HTTP_POST, []() {
         if (prepareForFlash) {
             server.send(503, "text/plain", "System is locked for flashing.");
@@ -229,54 +241,46 @@ void setupWebServer() {
         playStatusChord(true);
     });
     
-
-    // curl -X POST http://10.1.1.4:9980/api/brick
     server.on("/api/brick", HTTP_POST, []() {
         prepareForFlash = true;
-
         server.send(200, "application/json", "{\"status\":\"flash_mode_active\", \"message\":\"Hardware suspended. Ready for firmware upload.\"}");
         playStatusChord(true);
     });
 
-    // curl -X POST http://10.1.1.4:9980/api/gamma
     server.on("/api/gamma", HTTP_POST, []() {
-        for (int i=0; i < NUM_PIXELS; i++) {
+        for (int i=0; i < LOGICAL_STEPS; i++) {
             showProgress(i);
             vTaskDelay(pdMS_TO_TICKS(120));
         }
         server.send(200, "application/json", "{\"status\":\"success\", \"message\":\"Hope you had some fun!.\"}");
     });
 
-    //curl -X POST http://10.1.1.4:9980/api/play -d "freq=880&duration=1500"
+    server.on("/api/hourly", HTTP_POST, []() {
+        performHourlyAction();
+        server.send(200, "application/json", "{\"status\":\"success\", \"message\":\"Hope you had some fun!.\"}");
+    });
+
     server.on("/api/play", HTTP_POST, []() {
-        // 1. Validate parameters exist
         if (!server.hasArg("freq") || !server.hasArg("duration")) {
             server.send(400, "application/json", "{\"status\":\"error\", \"message\":\"Missing 'freq' or 'duration'\"}");
             return;
         }
 
-        // 2. Parse to integers
         int freq = server.arg("freq").toInt();
         int duration = server.arg("duration").toInt();
 
-        // 3. Sanity checks
         if (freq <= 0 || duration <= 0) {
             server.send(400, "application/json", "{\"status\":\"error\", \"message\":\"Values must be greater than 0\"}");
             return;
         }
 
-        // 4. Clamp duration to a maximum of 1000ms
         if (duration > 1000) {
             duration = 1000;
         }
 
-        // 5. Fire the asynchronous beep
         beepAsync(freq, duration);
-                
         server.send(200, "application/json", "{\"status\":\"success\", \"message\":\"Hope you had some fun!.\"}");
     });
-
-
 
     server.begin();
 }
@@ -293,7 +297,7 @@ void pingTask(void *pvParameters) {
     size_t currentIndex = 0;
 
     for (;;) {
-        if (prepareForFlash) vTaskSuspend(NULL); // Commit task suicide if flashing
+        if (prepareForFlash) vTaskSuspend(NULL); 
 
         if (isBroken) {
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -353,6 +357,7 @@ void ledTask(void *pvParameters) {
     float smoothTemp = 0.0; 
     float smoothVelocity = 0.0;
     float phase = 0.0;
+    uint32_t failColors[NUM_PIXELS];
 
     for (;;) {
         if (prepareForFlash) vTaskSuspend(NULL); 
@@ -366,54 +371,38 @@ void ledTask(void *pvParameters) {
 
         bool allUp = true;
         bool initComplete = false;
-        std::vector<bool> currentStatus;
+        int serviceCount = 0;
 
         xSemaphoreTake(configMutex, portMAX_DELAY);
         initComplete = initialScanComplete;
-        currentStatus = serviceStatus; 
+        serviceCount = serviceStatus.size();
+        for(int i = 0; i < serviceCount && i < NUM_PIXELS; i++) {
+            failColors[i] = serviceStatus[i] ? strip.Color(0, 255, 0) : strip.Color(255, 0, 0);
+            if(!serviceStatus[i]) allUp = false;
+        }
+        if (serviceCount == 0) allUp = true;
         xSemaphoreGive(configMutex);
 
-        if (currentStatus.empty()) {
-            allUp = true; 
-        } else {
-            for (bool status : currentStatus) {
-                if (!status) { allUp = false; break; }
-            }
-        }
-
-        if (!initComplete && !currentStatus.empty()) allUp = false; 
+        if (!initComplete && serviceCount > 0) allUp = false; 
 
         if (allUp) {
             if (currentTemp > 0) {
-                // The ONLY conditional required is to snap the baseline on the very first boot 
-                // so it doesn't take 5 minutes to mathematically crawl from 0°C to 25°C.
                 if (smoothTemp == 0.0) {
                     smoothTemp = currentTemp; 
                 } 
 
-                // 1. Calculate the tension between the raw sensor and the smoothed display state
                 float delta = currentTemp - smoothTemp;
-
-                // 2. Heavy Inertial Temperature (Drives the color transition)
-                // Climbs toward the raw reading at 1% of the distance per frame.
                 smoothTemp += delta * 0.01; 
 
-                // 3. Heavy Inertial Velocity (Drives the sine wave phase)
-                // The wave speed is a direct factor of the temperature tension.
-                float targetVelocity = delta * 4.0; // Multiplier defines sensitivity to sudden spikes
-                
-                // Momentum bleeds in/out at 5% per frame for smooth spin-up and spin-down
+                float targetVelocity = delta * 4.0; 
                 smoothVelocity += (targetVelocity - smoothVelocity) * 0.05; 
-
-                // Apply velocity to the phase
                 phase += smoothVelocity;
 
-                // --- RENDER ---
                 uint8_t baseR, baseG, baseB;
                 getTemperatureRGB(smoothTemp, baseR, baseG, baseB);
 
                 for (int i = 0; i < NUM_PIXELS; i++) {
-                    float val = sin((float)i * 0.8 + phase);
+                    float val = sin((float)i * 0.32 + phase);
                     if (val > 1.0) val = 1.0;
                     if (val < -1.0) val = -1.0;  
                     float brightness = (val + 1.0) / 2.0; 
@@ -429,8 +418,24 @@ void ledTask(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(33)); 
         } else {
             strip.clear();
-            for (size_t i = 0; i < currentStatus.size() && i < NUM_PIXELS; i++) {
-                strip.setPixelColor(i, currentStatus[i] ? strip.Color(0, 255, 0) : strip.Color(255, 0, 0));
+            if (serviceCount > 0) {
+                int gapSize = 2; 
+                int totalGaps = serviceCount - 1;
+                int sectionSize = (NUM_PIXELS - (totalGaps * gapSize)) / serviceCount;
+                
+                if (sectionSize < 1) { 
+                    sectionSize = 1; 
+                    gapSize = 1; 
+                }
+
+                int currentPixel = 0;
+                for (int i = 0; i < serviceCount; i++) {
+                    for (int p = 0; p < sectionSize && currentPixel < NUM_PIXELS; p++) {
+                        strip.setPixelColor(NUM_PIXELS - currentPixel - 1, failColors[i]);
+                        currentPixel++;
+                    }
+                    currentPixel += gapSize;
+                }
             }
             strip.show();
             vTaskDelay(pdMS_TO_TICKS(200)); 
@@ -442,11 +447,8 @@ void motorTask(void *pvParameters) {
     MotorState currentState = STATE_DUMMY; 
     MotorState incomingState;
   
-
     for (;;) {
-        if (prepareForFlash) vTaskSuspend(NULL); // Commit task suicide if flashing
-
-        //BaseType_t stateReceived = xQueueReceive(motorStateQueue, &incomingState, currentTimeout);
+        if (prepareForFlash) vTaskSuspend(NULL); 
 
         digitalWrite(PIN_RIGHT, HIGH); digitalWrite(PIN_LEFT, LOW); 
         vTaskDelay(pdMS_TO_TICKS(3000)); 
@@ -473,41 +475,25 @@ void otaTask(void *pvParameters) {
     }
 }
 
-void performHourlyAction() {
-    ledcWriteTone(PIN_BUZZER, 2048);
-    delay(60); 
-    ledcWriteTone(PIN_BUZZER, 0);
-    LOG_PRINTLN("hourly action fired!");
-}
-
-// FreeRTOS Task for async execution
 void hourlyTask(void *pvParameters) {
   vTaskDelay(10000 / portTICK_PERIOD_MS);
 
   for(;;) {
     struct tm timeinfo;
     
-    // If time isn't set yet, wait 1 second and check again
     if (!getLocalTime(&timeinfo)) {
       vTaskDelay(1000 / portTICK_PERIOD_MS);
       LOG_PRINTLN("HA: Can't get time on tick");
       continue;
     }
 
-    // Calculate exactly how many seconds remain until the next xx:00:00
     uint32_t seconds_until_next = ((59 - timeinfo.tm_min) * 60) + (60 - timeinfo.tm_sec);
 
     if (timeinfo.tm_min == 0 &&  timeinfo.tm_sec == 0) {
-      // It is exactly the top of the hour. Execute.
       performHourlyAction();
-      
-      // Sleep for 2 seconds to completely bypass the 00:00:00 window
-      // preventing any double-executions.
       vTaskDelay(2000 / portTICK_PERIOD_MS); 
     } else {
-      // To account for NTP adjusting the clock while we sleep, we don't sleep 
-      // for the entire duration. We sleep until 2 seconds *before* the target.
-      uint32_t sleep_time_ms = 20; // default to 20ms polling when very close
+      uint32_t sleep_time_ms = 20; 
       
       if (seconds_until_next > 180) {
         seconds_until_next = 180;
@@ -517,39 +503,33 @@ void hourlyTask(void *pvParameters) {
         sleep_time_ms = (seconds_until_next - 2) * 1000;
       }
       
-      // Asynchronously yield the CPU 
       vTaskDelay(sleep_time_ms / portTICK_PERIOD_MS);
     }
   }
 }
 
-// --- Main Setup ---
-void setup() {
+// --- Initialization Block ---
+void initHardware() {
     Serial.begin(115200);
     strip.begin();
     strip.clear();
     strip.show();
 
-    buzzerTimer = xTimerCreate(
-        "BuzzerTimer",         // Internal name
-        pdMS_TO_TICKS(180),    // Default duration
-        pdFALSE,               // pdFALSE = One-shot (don't repeat)
-        (void *)0,             // Timer ID (unused here)
-        buzzerStopCallback     // The function to run when time is up
-    );
+    buzzerTimer = xTimerCreate("BuzzerTimer", pdMS_TO_TICKS(180), pdFALSE, (void *)0, buzzerStopCallback);
     
     pinMode(PIN_RIGHT, OUTPUT);
     pinMode(PIN_LEFT, OUTPUT);
     digitalWrite(PIN_RIGHT, LOW);
     digitalWrite(PIN_LEFT, LOW);
+    
     ledcAttach(PIN_BUZZER, 2000, 8); 
     ledcWriteTone(PIN_BUZZER, 0);
     
     pinMode(STATUS_LED, OUTPUT);
     ledOn();
+    
     showProgress(0);
     
-    // watchdog
     esp_task_wdt_config_t twdt_config = {
         .timeout_ms = WDT_TIMEOUT_S * 1000,
         .idle_core_mask = 0,
@@ -557,10 +537,12 @@ void setup() {
     };
     esp_task_wdt_reconfigure(&twdt_config);
     esp_task_wdt_add(NULL);
-    showProgress(1);
     
-    // wifi
-    WiFi.begin(ssid, password);
+    showProgress(1);
+}
+
+void initWiFi() {
+    WiFi.begin(ssid, wifi_password);
     while (WiFi.status() != WL_CONNECTED) {
         waitProgress(2);
     }
@@ -568,13 +550,13 @@ void setup() {
     TelnetStream.begin();
     esp_task_wdt_reset(); 
     showProgress(2);
+}
 
-    // --- Arduino OTA Setup ---
+void initOTA() {
     ArduinoOTA.setHostname("esp32-rotatotron");
-    ArduinoOTA.setPassword(password); // Re-using your WiFi password for OTA auth
+    ArduinoOTA.setPassword(firmware_upload_password); 
 
     ArduinoOTA.onStart([]() {
-        // Forcefully drop all hardware lines to 0 to prevent brownouts
         digitalWrite(PIN_RIGHT, LOW);
         digitalWrite(PIN_LEFT, LOW);
         ledcWriteTone(PIN_BUZZER, 0);
@@ -604,11 +586,11 @@ void setup() {
     });
 
     ArduinoOTA.begin();
-    // Spawn the OTA listener task
     xTaskCreate(otaTask, "OTATask", 4096, NULL, 1, NULL);
     showProgress(3);
+}
 
-    // tasks 1
+void initServices() {
     motorStateQueue = xQueueCreate(2, sizeof(MotorState));
     configMutex = xSemaphoreCreateMutex();
     buzzerMutex = xSemaphoreCreateMutex();
@@ -635,7 +617,6 @@ void setup() {
     }
     xSemaphoreGive(configMutex);
 
-    // NTP time sync
     sntp_set_sync_interval(900 * 1000);
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer1, ntpServer2);
 
@@ -647,12 +628,13 @@ void setup() {
 
     esp_task_wdt_reset();
     showProgress(4);
+}
 
-    // bme
+void initSensors() {
     SPI.begin(BME_SCK, BME_MISO, BME_MOSI, BME_CS);
     if (!bme.begin()) {
         playStatusChord(false);
-        delay(500); // Let the chord finish
+        delay(500); 
         while(true) {
             waitProgress(5);
         }
@@ -664,21 +646,14 @@ void setup() {
     bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
     bme.setGasHeater(320, 150); 
     showProgress(5);
-        
+}
 
-    // tasks 2
+void initTasks() {
     xTaskCreate(motorTask,  "MotorTask",  2048, NULL, 1, NULL);
     xTaskCreate(pingTask,   "PingTask",   4096, NULL, 1, NULL);
     xTaskCreate(ledTask,    "LEDTask",    4096, NULL, 1, NULL);
     xTaskCreate(serverTask, "ServerTask", 4096, NULL, 1, NULL);
-    xTaskCreate(
-        hourlyTask,     // Function to implement the task
-        "HourlyTask",   // Name of the task
-        4096,           // Stack size in words
-        NULL,           // Task input parameter
-        1,              // Priority of the task
-        NULL           // Task handle
-    );
+    xTaskCreate(hourlyTask, "HourlyTask", 4096, NULL, 1, NULL);
 
     ledOn();
     esp_task_wdt_reset();
@@ -688,15 +663,23 @@ void setup() {
     showProgress(8);
 }
 
+// --- Main Setup ---
+void setup() {
+    initHardware();
+    initWiFi();
+    initOTA();
+    initServices();
+    initSensors();
+    initTasks();
+}
+
 // --- Main Loop ---
 void loop() {
-    // --- The Flash Shutdown Override ---
     if (prepareForFlash) {
         static bool shutdownComplete = false;
         if (!shutdownComplete) {
-            vTaskDelay(pdMS_TO_TICKS(300)); // Allow running tasks 300ms to exit loops and suspend
+            vTaskDelay(pdMS_TO_TICKS(300)); 
             
-            // Forcefully drop all hardware lines to 0
             digitalWrite(PIN_RIGHT, LOW);
             digitalWrite(PIN_LEFT, LOW);
             ledcWriteTone(PIN_BUZZER, 0);
@@ -704,13 +687,12 @@ void loop() {
             strip.clear();
             strip.show();
             
-            ledOn(); // Keep the onboard LED solid on to indicate it's ready
+            ledOn(); 
             
             shutdownComplete = true;
             Serial.println("System Locked. Hardware secured. Ready for Flash.");
         }
         
-        // Feed watchdog to prevent kernel panic, do nothing else.
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(1000));
         return;
@@ -728,8 +710,6 @@ void loop() {
     }
 
     if (isBroken != wasBroken) {
-        //MotorState newState = isWifiConnected ? STATE_WIFI_CONNECTED : STATE_WIFI_DISCONNECTED;
-        //xQueueSend(motorStateQueue, &newState, 0);
         wasBroken = isBroken;
         playStatusChord(!isBroken);
     }
@@ -742,22 +722,30 @@ void loop() {
     currentTemp = bme.temperature;
 
     String tags = "|#family:esp32";
-    String packet = "";
+    char packet[256];
     
-    packet += "esp32.wifi_rssi:"   + String(abs(WiFi.RSSI()))          + "|g" + tags + "\n";
-    packet += "esp32.cycle:"       + String(++cycle)                   + "|g" + tags + "\n";
-    packet += "esp32.uptime:"      + String(log(cycle) * 10000.0)      + "|g" + tags + "\n";
-    packet += "esp32.temperature:" + String(bme.temperature)           + "|g" + tags + "\n";
-    packet += "esp32.humidity:"    + String(bme.humidity)              + "|g" + tags + "\n";
-    packet += "esp32.pressure:"    + String(bme.pressure / 133.322)    + "|g" + tags + "\n";
-    packet += "esp32.gas:"         + String(bme.gas_resistance / 1000) + "|g" + tags;
+    snprintf(packet, sizeof(packet), 
+             "esp32.wifi_rssi:%d|g%s\n"
+             "esp32.cycle:%lu|g%s\n"
+             "esp32.uptime:%.2f|g%s\n"
+             "esp32.temperature:%.2f|g%s\n"
+             "esp32.humidity:%.2f|g%s\n"
+             "esp32.pressure:%.2f|g%s\n"
+             "esp32.gas:%.2f|g%s",
+             abs(WiFi.RSSI()), tags.c_str(),
+             ++cycle, tags.c_str(),
+             log(cycle) * 10000.0, tags.c_str(),
+             bme.temperature, tags.c_str(),
+             bme.humidity, tags.c_str(),
+             bme.pressure / 133.322, tags.c_str(),
+             bme.gas_resistance / 1000.0, tags.c_str());
 
     udp.beginPacket(statsd_ip, statsd_port);
     udp.print(packet);
     udp.endPacket();
     
     ledOff();
-    LOG_PRINTF("tick %d temp: %f\n", cycle, bme.temperature);
+    LOG_PRINTF("tick %lu temp: %f\n", cycle, bme.temperature);
     esp_task_wdt_reset(); 
  
     vTaskDelay(pdMS_TO_TICKS(3000)); 
