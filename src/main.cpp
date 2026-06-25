@@ -96,12 +96,14 @@ enum MotorRotate {
 };
 
 struct ColorPoint { float temp; uint8_t r, g, b; };
+
 ColorPoint palette[] = {
-    {15.0, 0, 0, 255},       // Deep Blue
-    {20.0, 0, 255, 255},     // Cyan
+    {15.0, 0, 255, 255},     // Cyan
+    {20.0, 0, 0, 255},       // Deep Blue
     {25.0, 255, 0, 176},     // Pink
     {30.0, 255, 44, 0},      // Orange
-    {35.0, 255, 255, 0}      // Yellow
+    {35.0, 255, 255, 0},      // Yellow
+    {40.0, 255, 255, 255  }   // White
 };
 
 // --- DYNAMIC LUT CONFIGURATION ---
@@ -449,7 +451,8 @@ void ledDrawTemperature() {
     // Adjust the 0.01 multiplier if you want the scrolling to lag/catch up faster.
     smoothTemp += (currentTemp - smoothTemp) * 0.001; 
 
-    float viewportWidthCelsius = 0.11; 
+    float viewportWidthCelsius = 0.25; 
+    float spikeFactor = 1.95;
     
     float cameraLeftEdgeTemp = smoothTemp - (viewportWidthCelsius / 2.0);
     float degreesPerPixel = viewportWidthCelsius / (float)NUM_PIXELS;
@@ -469,7 +472,9 @@ void ledDrawTemperature() {
 
         // 2. Evaluate the permanent waves molded into x
         // --- ON STATE LOGIC ---
-        float valOn = sin(x * onFreq) - 0.25; 
+        float sinVal = sin(x * onFreq);
+        float cosVal = cos(x * onFreq);
+        float valOn = (sinVal/(1. + spikeFactor * cosVal * cosVal)) - 0.82; 
         if (valOn > 1.0) valOn = 1.0;
         if (valOn < -1.0) valOn = -1.0;  
         float finalBrightness = (valOn + 1.0) / 2.0; 
