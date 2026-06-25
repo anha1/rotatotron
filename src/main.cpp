@@ -21,6 +21,10 @@
 
 #include "secrets.h" // Local credentials (ignored by Git)
 
+#ifndef ESP_FIRMWARE_PASS
+#error "ESP_FIRMWARE_PASS is not defined. Did you export the environment variable?"
+#endif
+
 // a logging macro to send output to both USB and Wi-Fi simultaneously
 #define LOG_PRINT(x)    { Serial.print(x); TelnetStream.print(x); }
 #define LOG_PRINTLN(x)  { Serial.println(x); TelnetStream.println(x); }
@@ -51,7 +55,7 @@ const int LOGICAL_STEPS = 9;
 const char* ssid       = WIFI_SSID;
 const char* wifi_password   = WIFI_PASSWORD;
 
-const char* firmware_upload_password = "YOUR_PASSWORD_HERE";  // keep in sync with platformio.ini
+const char* firmware_upload_password = ESP_FIRMWARE_PASS;  // keep in sync with platformio.ini
 const char* statsd_ip  = "10.1.1.1";
 const int statsd_port  = 8125;
 
