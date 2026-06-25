@@ -69,7 +69,7 @@ QueueHandle_t motorStateQueue;
 
 unsigned long cycle = 0;
 
-volatile float currentTemp = 0.0;
+volatile float currentTemp = -100;
 volatile bool prepareForFlash = false; // Flash-mode safety flag
 volatile bool isBroken = false;
 bool wasBroken = false; 
@@ -103,6 +103,70 @@ ColorPoint palette[] = {
     {30.0, 255, 44, 0},      // Orange
     {35.0, 255, 255, 0}      // Yellow
 };
+
+// --- DYNAMIC LUT CONFIGURATION ---
+struct RGB { uint8_t r, g, b; };
+RGB* tempLUT = nullptr; // Pointer for dynamic heap allocation
+
+const float LUT_RESOLUTION = 0.1f; // Tweak this anytime
+float LUT_MIN_TEMP = 0.0f;
+int LUT_SIZE = 0;
+float LUT_INV_RES = 0.0f; 
+
+// The heavy interpolation function (Used ONLY during setup)
+void calculateTemperatureRGB(float t, uint8_t &r, uint8_t &g, uint8_t &b) {
+    int numPoints = sizeof(palette) / sizeof(palette[0]);
+    if (t <= palette[0].temp) { r = palette[0].r; g = palette[0].g; b = palette[0].b; return; }
+    if (t >= palette[numPoints - 1].temp) { r = palette[numPoints - 1].r; g = palette[numPoints - 1].g; b = palette[numPoints - 1].b; return; }
+
+    for (int i = 0; i < numPoints - 1; i++) {
+        if (t >= palette[i].temp && t <= palette[i+1].temp) {
+            float range = palette[i+1].temp - palette[i].temp;
+            float pct = (t - palette[i].temp) / range;
+            r = palette[i].r + pct * (palette[i+1].r - palette[i].r);
+            g = palette[i].g + pct * (palette[i+1].g - palette[i].g);
+            b = palette[i].b + pct * (palette[i+1].b - palette[i].b);
+            return;
+        }
+    }
+    r = 0; g = 0; b = 0;
+}
+
+// Call this EXACTLY ONCE inside your setup() function
+void prebakeLUT() {
+    int numPoints = sizeof(palette) / sizeof(palette[0]);
+    
+    // Automatically extract boundaries from your palette array
+    LUT_MIN_TEMP = palette[0].temp;
+    float LUT_MAX_TEMP = palette[numPoints - 1].temp;
+    
+    // Calculate required array size and the inverse resolution for fast math
+    LUT_SIZE = (int)((LUT_MAX_TEMP - LUT_MIN_TEMP) / LUT_RESOLUTION) + 1;
+    LUT_INV_RES = 1.0f / LUT_RESOLUTION; 
+    
+    // Dynamically allocate contiguous RAM for the LUT
+    tempLUT = new RGB[LUT_SIZE];
+    
+    // Bake the colors
+    for (int i = 0; i < LUT_SIZE; i++) {
+        float t = LUT_MIN_TEMP + (i * LUT_RESOLUTION);
+        calculateTemperatureRGB(t, tempLUT[i].r, tempLUT[i].g, tempLUT[i].b);
+    }
+}
+
+// The O(1) inline lookup for the main render loop
+inline void getTemperatureRGB(float t, uint8_t &r, uint8_t &g, uint8_t &b) {
+    // Fast multiplication using the precomputed inverse resolution
+    int idx = (int)((t - LUT_MIN_TEMP) * LUT_INV_RES);
+    
+    // Clamp bounds
+    if (idx < 0) idx = 0;
+    if (idx >= LUT_SIZE) idx = LUT_SIZE - 1;
+    
+    r = tempLUT[idx].r;
+    g = tempLUT[idx].g;
+    b = tempLUT[idx].b;
+}
 
 // --- Helper Functions ---
 void ledOn() { digitalWrite(STATUS_LED, LOW); }
@@ -185,22 +249,6 @@ void performHourlyAction() {
     LOG_PRINTLN("hourly action fired!");
 }
 
-void getTemperatureRGB(float t, uint8_t &r, uint8_t &g, uint8_t &b) {
-    if (t <= 10.0) { r = 0; g = 0; b = 255; return; }
-    if (t >= 40.0) { r = 255; g = 255; b = 0; return; }
-
-    for (int i = 0; i < 5; i++) {
-        if (t >= palette[i].temp && t <= palette[i+1].temp) {
-            float range = palette[i+1].temp - palette[i].temp;
-            float pct = (t - palette[i].temp) / range;
-            r = palette[i].r + pct * (palette[i+1].r - palette[i].r);
-            g = palette[i].g + pct * (palette[i+1].g - palette[i].g);
-            b = palette[i].b + pct * (palette[i+1].b - palette[i].b);
-            return;
-        }
-    }
-    r = 0; g = 0; b = 0;
-}
 
 // --- Web Server Setup ---
 void setupWebServer() {
@@ -363,9 +411,87 @@ void pingTask(void *pvParameters) {
     }
 }
 
+void ledDrawServices(int serviceCount, uint32_t* failColors) {
+    strip.clear();
+    if (serviceCount > 0) {
+        int gapSize = 2; 
+        int totalGaps = serviceCount - 1;
+        int sectionSize = (NUM_PIXELS - (totalGaps * gapSize)) / serviceCount;
+        
+        if (sectionSize < 1) { 
+            sectionSize = 1; 
+            gapSize = 1; 
+        }
+
+        int currentPixel = 0;
+        for (int i = 0; i < serviceCount; i++) {
+            for (int p = 0; p < sectionSize && currentPixel < NUM_PIXELS; p++) {
+                strip.setPixelColor(NUM_PIXELS - currentPixel - 1, failColors[i]);
+                currentPixel++;
+            }
+            currentPixel += gapSize;
+        }
+    }
+    strip.show();
+}
+
+float smoothTemp = -100;
+
+void ledDrawTemperature() {
+    if (currentTemp < 0) {
+        return;
+    }
+
+    if (smoothTemp < 0.0) {
+        smoothTemp = currentTemp; 
+    } 
+
+    // Adjust the 0.01 multiplier if you want the scrolling to lag/catch up faster.
+    smoothTemp += (currentTemp - smoothTemp) * 0.001; 
+
+    float viewportWidthCelsius = 0.11; 
+    
+    float cameraLeftEdgeTemp = smoothTemp - (viewportWidthCelsius / 2.0);
+    float degreesPerPixel = viewportWidthCelsius / (float)NUM_PIXELS;
+
+    // Wave frequencies in Temperature Space (Radians per Degree Celsius)
+    float onFreq = 47.;     
+
+
+    for (int i = 0; i < NUM_PIXELS; i++) {
+        
+        // x = the absolute coordinate on the infinite Celsius canvas
+        float x = cameraLeftEdgeTemp + ((float)i * degreesPerPixel);
+
+        // 1. Fetch the permanent color painted at x
+        uint8_t baseR, baseG, baseB;
+        getTemperatureRGB(x, baseR, baseG, baseB);
+
+        // 2. Evaluate the permanent waves molded into x
+        // --- ON STATE LOGIC ---
+        float valOn = sin(x * onFreq) - 0.25; 
+        if (valOn > 1.0) valOn = 1.0;
+        if (valOn < -1.0) valOn = -1.0;  
+        float finalBrightness = (valOn + 1.0) / 2.0; 
+        finalBrightness *= 0.66;
+
+        float finalR = (baseR * finalBrightness);
+        float finalG = (baseG * finalBrightness);
+        float finalB = (baseB * finalBrightness);
+
+        if (finalR > 255) finalR = 255;
+        if (finalG > 255) finalG = 255;
+        if (finalB > 255) finalB = 255;
+
+        strip.setPixelColor(i, strip.Color((uint8_t)finalR, (uint8_t)finalG, (uint8_t)finalB));
+    }
+
+    strip.show();
+
+}
+
 void ledTask(void *pvParameters) {
-    float smoothTemp = 0.0; 
-    float smoothVelocity = 0.0;
+
     float phase = 0.0;
     uint32_t failColors[NUM_PIXELS];
 
@@ -396,58 +522,10 @@ void ledTask(void *pvParameters) {
         if (!initComplete && serviceCount > 0) allUp = false; 
 
         if (allUp) {
-            if (currentTemp > 0) {
-                if (smoothTemp == 0.0) {
-                    smoothTemp = currentTemp; 
-                } 
-
-                float delta = currentTemp - smoothTemp;
-                smoothTemp += delta * 0.01; 
-
-                float targetVelocity = delta * 4.0; 
-                smoothVelocity += (targetVelocity - smoothVelocity) * 0.05; 
-                phase += smoothVelocity;
-
-                uint8_t baseR, baseG, baseB;
-                getTemperatureRGB(smoothTemp, baseR, baseG, baseB);
-
-                for (int i = 0; i < NUM_PIXELS; i++) {
-                    float val = sin((float)i * 0.32 + phase) - 0.25; //  mute a bit and add asymmetry 
-                    if (val > 1.0) val = 1.0;
-                    if (val < -1.0) val = -1.0;  
-                    float brightness = (val + 1.0) / 2.0; 
-                    
-                    strip.setPixelColor(i, strip.Color(
-                        (uint8_t)(baseR * brightness), 
-                        (uint8_t)(baseG * brightness), 
-                        (uint8_t)(baseB * brightness)
-                    ));
-                }
-                strip.show();
-            }
+            ledDrawTemperature();
             vTaskDelay(pdMS_TO_TICKS(33)); 
         } else {
-            strip.clear();
-            if (serviceCount > 0) {
-                int gapSize = 2; 
-                int totalGaps = serviceCount - 1;
-                int sectionSize = (NUM_PIXELS - (totalGaps * gapSize)) / serviceCount;
-                
-                if (sectionSize < 1) { 
-                    sectionSize = 1; 
-                    gapSize = 1; 
-                }
-
-                int currentPixel = 0;
-                for (int i = 0; i < serviceCount; i++) {
-                    for (int p = 0; p < sectionSize && currentPixel < NUM_PIXELS; p++) {
-                        strip.setPixelColor(NUM_PIXELS - currentPixel - 1, failColors[i]);
-                        currentPixel++;
-                    }
-                    currentPixel += gapSize;
-                }
-            }
-            strip.show();
+            ledDrawServices(serviceCount, failColors);
             vTaskDelay(pdMS_TO_TICKS(200)); 
         }
     }
@@ -600,6 +678,7 @@ void initWiFi() {
 
 void initOTA() {
     ArduinoOTA.setHostname("esp32-rotatotron");
+    ArduinoOTA.setPort(1725);
     ArduinoOTA.setPassword(firmware_upload_password); 
 
     ArduinoOTA.onStart([]() {
@@ -714,6 +793,7 @@ void setup() {
     initHardware();
     initWiFi();
     initOTA();
+    prebakeLUT();
     initServices();
     initSensors();
     initTasks();
