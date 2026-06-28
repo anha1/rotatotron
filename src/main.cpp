@@ -74,6 +74,7 @@ QueueHandle_t motorStateQueue;
 unsigned long cycle = 0;
 
 volatile float currentTemp = -100;
+volatile float spikeFactor = 1.0; // 1.0 broad,  20.0 spiky
 volatile bool prepareForFlash = false; // Flash-mode safety flag
 volatile bool isBroken = false;
 bool wasBroken = false; 
@@ -244,7 +245,7 @@ void playStatusChord(bool isUp) {
     ledcWriteTone(PIN_BUZZER, 0);
 }
 
-void performHourlyAction() {
+void performHourlyAction(int hour) {
     ledcWriteTone(PIN_BUZZER, 2048);
     delay(160); 
     ledcWriteTone(PIN_BUZZER, 0);
@@ -252,6 +253,8 @@ void performHourlyAction() {
     ledcWriteTone(PIN_BUZZER, 2048);
     delay(80); 
     ledcWriteTone(PIN_BUZZER, 0);
+    // Calculates a linear scale from 1.0 at 12:00 to 20.0 at 00:00
+    float spikeFactor = 1.0f + (19.0f / 12.0f) * abs(hour - 12);
     LOG_PRINTLN("hourly action fired!");
 }
 
@@ -317,7 +320,7 @@ void setupWebServer() {
     });
 
     server.on("/api/hourly", HTTP_POST, []() {
-        performHourlyAction();
+        performHourlyAction(12);
         server.send(200, "application/json", "{\"status\":\"success\", \"message\":\"Hope you had some fun!.\"}");
     });
 
@@ -456,8 +459,7 @@ void ledDrawTemperature() {
     smoothTemp += (currentTemp - smoothTemp) * 0.001; 
 
     float viewportWidthCelsius = 0.25; 
-    float spikeFactor = 1.95;
-    
+
     float cameraLeftEdgeTemp = smoothTemp - (viewportWidthCelsius / 2.0);
     float degreesPerPixel = viewportWidthCelsius / (float)NUM_PIXELS;
 
@@ -623,7 +625,7 @@ void hourlyTask(void *pvParameters) {
     uint32_t seconds_until_next = ((59 - timeinfo.tm_min) * 60) + (60 - timeinfo.tm_sec);
 
     if (timeinfo.tm_min == 0 &&  timeinfo.tm_sec == 0) {
-      performHourlyAction();
+      performHourlyAction(timeinfo.tm_hour);
       vTaskDelay(2000 / portTICK_PERIOD_MS); 
     } else {
       uint32_t sleep_time_ms = 20; 
