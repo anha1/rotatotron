@@ -245,7 +245,18 @@ void playStatusChord(bool isUp) {
     ledcWriteTone(PIN_BUZZER, 0);
 }
 
-void performHourlyAction(int hour) {
+void refreshSpikeFactor() {
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo)) {
+        return;
+    }
+    float hour = timeinfo.tm_hour;
+
+    // spike at night
+    spikeFactor = 20. - 19. * pow(sin(hour * PI / 24.), 2.);
+}
+
+void performHourlyAction() {
     ledcWriteTone(PIN_BUZZER, 2048);
     delay(160); 
     ledcWriteTone(PIN_BUZZER, 0);
@@ -253,8 +264,6 @@ void performHourlyAction(int hour) {
     ledcWriteTone(PIN_BUZZER, 2048);
     delay(80); 
     ledcWriteTone(PIN_BUZZER, 0);
-    // Calculates a linear scale from 1.0 at 12:00 to 20.0 at 00:00
-    float spikeFactor = 1.0f + (19.0f / 12.0f) * abs(hour - 12);
     LOG_PRINTLN("hourly action fired!");
 }
 
@@ -320,7 +329,7 @@ void setupWebServer() {
     });
 
     server.on("/api/hourly", HTTP_POST, []() {
-        performHourlyAction(12);
+        performHourlyAction();
         server.send(200, "application/json", "{\"status\":\"success\", \"message\":\"Hope you had some fun!.\"}");
     });
 
@@ -480,7 +489,7 @@ void ledDrawTemperature() {
         // --- ON STATE LOGIC ---
         float sinVal = sin(x * onFreq);
         float cosVal = cos(x * onFreq);
-        float valOn = (sinVal/(1. + spikeFactor * cosVal * cosVal)) - 0.82; 
+        float valOn = (sinVal/(1. + spikeFactor * cosVal * cosVal)) - 0.95; 
         if (valOn > 1.0) valOn = 1.0;
         if (valOn < -1.0) valOn = -1.0;  
         float finalBrightness = (valOn + 1.0) / 2.0; 
@@ -612,7 +621,7 @@ void otaTask(void *pvParameters) {
 
 void hourlyTask(void *pvParameters) {
   vTaskDelay(10000 / portTICK_PERIOD_MS);
-
+  refreshSpikeFactor();
   for(;;) {
     struct tm timeinfo;
     
@@ -625,7 +634,8 @@ void hourlyTask(void *pvParameters) {
     uint32_t seconds_until_next = ((59 - timeinfo.tm_min) * 60) + (60 - timeinfo.tm_sec);
 
     if (timeinfo.tm_min == 0 &&  timeinfo.tm_sec == 0) {
-      performHourlyAction(timeinfo.tm_hour);
+      performHourlyAction();
+      refreshSpikeFactor();
       vTaskDelay(2000 / portTICK_PERIOD_MS); 
     } else {
       uint32_t sleep_time_ms = 20; 
