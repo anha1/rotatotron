@@ -18,6 +18,7 @@
 #include <vector>
 #include <esp_sntp.h>
 #include <TelnetStream.h>
+#include <TM1637Display.h>
 
 #include "secrets.h" // Local credentials (ignored by Git)
 
@@ -39,6 +40,10 @@ const int   daylightOffset_sec = 0;
 #define STATUS_LED 15
 #define WDT_TIMEOUT_S 120
 
+#define CLK_PIN 6
+#define DIO_PIN 7
+
+
 const int PIN_RIGHT = 21; 
 const int PIN_LEFT  = 22; 
 const int BME_CS    = 17;   
@@ -51,12 +56,13 @@ const int PIN_BUZZER    = 0;
 const int NUM_PIXELS    = 22;
 const int LOGICAL_STEPS = 9;
 
+
 // --- Network & Configuration ---
 const char* ssid       = WIFI_SSID;
 const char* wifi_password   = WIFI_PASSWORD;
 
 const char* firmware_upload_password = ESP_FIRMWARE_PASS;  // keep in sync with platformio.ini
-const char* statsd_ip  = "10.1.1.1";
+const char* statsd_ip  = "10.1.1.69";
 const int statsd_port  = 8125;
 
 
@@ -71,9 +77,12 @@ SemaphoreHandle_t configMutex;
 SemaphoreHandle_t buzzerMutex;
 QueueHandle_t motorStateQueue;
 
+TM1637Display display(CLK_PIN, DIO_PIN);
+
 unsigned long cycle = 0;
 
 volatile float currentTemp = -100;
+volatile int currentSec = 0;
 volatile float spikeFactor = 1.0; // 1.0 broad,  20.0 spiky
 volatile bool prepareForFlash = false; // Flash-mode safety flag
 volatile bool isBroken = false;
@@ -399,6 +408,10 @@ void pingTask(void *pvParameters) {
             bool triggerChord = false;
             bool chordType = false;
             
+            if (!isUp) {
+                LOG_PRINTF("Service %u down\n", currentIndex);
+            }
+
             xSemaphoreTake(configMutex, portMAX_DELAY);
             if (!coreServices.empty() && currentIndex < coreServices.size() && coreServices[currentIndex] == targetIp) {
                 if (isUp != serviceStatus[currentIndex]) {
@@ -450,10 +463,16 @@ void ledDrawServices(int serviceCount, uint32_t* failColors) {
             currentPixel += gapSize;
         }
     }
-    strip.show();
 }
 
 float smoothTemp = -100;
+
+void ledDrawSecond() {
+    uint8_t baseR, baseG, baseB;
+    getTemperatureRGB(currentTemp - 5, baseR, baseG, baseB);
+    int secPos = ((59 - currentSec) * (NUM_PIXELS - 1)) / 59;
+    strip.setPixelColor(secPos, strip.Color((uint8_t)baseR, (uint8_t)baseG, (uint8_t)baseB));
+}
 
 void ledDrawTemperature() {
     if (currentTemp < 0) {
@@ -506,7 +525,7 @@ void ledDrawTemperature() {
         strip.setPixelColor(i, strip.Color((uint8_t)finalR, (uint8_t)finalG, (uint8_t)finalB));
     }
 
-    strip.show();
+    
 
 }
 
@@ -514,6 +533,7 @@ void ledTask(void *pvParameters) {
 
     float phase = 0.0;
     uint32_t failColors[NUM_PIXELS];
+
 
     for (;;) {
         if (prepareForFlash) vTaskSuspend(NULL); 
@@ -543,11 +563,15 @@ void ledTask(void *pvParameters) {
 
         if (allUp) {
             ledDrawTemperature();
+            ledDrawSecond();
+            strip.show();
             vTaskDelay(pdMS_TO_TICKS(33)); 
         } else {
             ledDrawServices(serviceCount, failColors);
+            ledDrawSecond();
+            strip.show();
             vTaskDelay(pdMS_TO_TICKS(200)); 
-        }
+        }    
     }
 }
 
@@ -576,6 +600,33 @@ void motorRotate(MotorRotate mode) {
     }
 }
 
+void segmentTask(void *pvParameters) {
+    // Zero out the pulse array initially
+    struct tm timeinfo;
+
+    while(true) {
+        if (!getLocalTime(&timeinfo)) {
+            Serial.println("Failed to obtain time");
+            vTaskDelay(pdMS_TO_TICKS(1000)); 
+            continue;
+        }
+
+        int hours = timeinfo.tm_hour;
+        int minutes = timeinfo.tm_min;
+        currentSec = timeinfo.tm_sec;
+
+        // Combine into a 4-digit integer (e.g., 14:05 becomes 1405)
+        int displayTime = (hours * 100) + minutes;
+
+        uint8_t colonMask =  0x40; //(currentSec % 2 == 0) ? 0x40 : 0x00;
+
+        // Push to display: value, dot bitmask, enable leading zeros (so 4:05 AM shows as 04:05), length, position
+        display.showNumberDecEx(displayTime, colonMask, true, 4, 0);
+
+        vTaskDelay(pdMS_TO_TICKS(900)); 
+    }
+}
+
 void motorTask(void *pvParameters) {
     MotorState currentState = STATE_DUMMY; 
     MotorState incomingState;
@@ -589,8 +640,6 @@ void motorTask(void *pvParameters) {
             motorRotate(ROTATE_IDLE);
             motorRegularOrPanicWait(0);
         } else {
-            motorRotate(ROTATE_RIGHT);
-            motorRegularOrPanicWait(3000); 
             motorRotate(ROTATE_LEFT);
             motorRegularOrPanicWait(20000); 
             motorRotate(ROTATE_RIGHT);
@@ -598,8 +647,6 @@ void motorTask(void *pvParameters) {
             motorRotate(ROTATE_IDLE);
             motorRegularOrPanicWait(90000); 
 
-            motorRotate(ROTATE_LEFT);
-            motorRegularOrPanicWait(3000); 
             motorRotate(ROTATE_RIGHT);
             motorRegularOrPanicWait(20000); 
             motorRotate(ROTATE_LEFT);
@@ -672,6 +719,9 @@ void initHardware() {
     
     pinMode(STATUS_LED, OUTPUT);
     ledOn();
+
+    display.setBrightness(0x0f);
+
     
     showProgress(0);
     
@@ -795,11 +845,12 @@ void initSensors() {
 }
 
 void initTasks() {
-    xTaskCreate(motorTask,  "MotorTask",  2048, NULL, 1, NULL);
-    xTaskCreate(pingTask,   "PingTask",   4096, NULL, 1, NULL);
-    xTaskCreate(ledTask,    "LEDTask",    4096, NULL, 1, NULL);
-    xTaskCreate(serverTask, "ServerTask", 4096, NULL, 1, NULL);
-    xTaskCreate(hourlyTask, "HourlyTask", 4096, NULL, 1, NULL);
+    xTaskCreate(motorTask,   "MotorTask",    2048, NULL, 1, NULL);
+    xTaskCreate(pingTask,    "PingTask",     4096, NULL, 1, NULL);
+    xTaskCreate(ledTask,     "LEDTask",      4096, NULL, 1, NULL);
+    xTaskCreate(serverTask,  "ServerTask",   4096, NULL, 1, NULL);
+    xTaskCreate(hourlyTask,  "HourlyTask",   4096, NULL, 1, NULL);
+    xTaskCreate(segmentTask, "SegmentTask",  4096, NULL, 1, NULL);
 
     ledOn();
     esp_task_wdt_reset();
