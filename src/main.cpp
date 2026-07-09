@@ -31,11 +31,6 @@
 #define LOG_PRINTLN(x)  { Serial.println(x); TelnetStream.println(x); }
 #define LOG_PRINTF(...) { Serial.printf(__VA_ARGS__); TelnetStream.printf(__VA_ARGS__); }
 
-const char* ntpServer1 = "pool.ntp.org";
-const char* ntpServer2 = "time.nist.gov";
-const long  gmtOffset_sec = 0;
-const int   daylightOffset_sec = 0;
-
 // --- Hardware & Pin Definitions ---
 #define STATUS_LED 15
 #define WDT_TIMEOUT_S 120
@@ -60,6 +55,7 @@ const int LOGICAL_STEPS = 9;
 // --- Network & Configuration ---
 const char* ssid       = WIFI_SSID;
 const char* wifi_password   = WIFI_PASSWORD;
+const char* TZ_INFO = "GMT0BST,M3.5.0/1,M10.5.0";
 
 const char* firmware_upload_password = ESP_FIRMWARE_PASS;  // keep in sync with platformio.ini
 const char* statsd_ip  = "10.1.1.69";
@@ -814,8 +810,7 @@ void initServices() {
     xSemaphoreGive(configMutex);
 
     sntp_set_sync_interval(900 * 1000);
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer1, ntpServer2);
-
+    configTzTime(TZ_INFO, "pool.ntp.org", "time.nist.gov");
     struct tm timeinfo;
     LOG_PRINTLN("Waiting for NTP sync");
     while (!getLocalTime(&timeinfo)) {
@@ -865,6 +860,7 @@ void setup() {
     initHardware();
     initWiFi();
     initOTA();
+
     prebakeLUT();
     initServices();
     initSensors();
