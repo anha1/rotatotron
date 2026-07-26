@@ -20,7 +20,7 @@
 #include <TelnetStream.h>
 #include <TM1637Display.h>
 
-#include "secrets.h" // Local credentials (ignored by Git)
+#include "/home/user/git/secrets/secrets.h" // Local credentials (ignored by Git)
 
 #ifndef ESP_FIRMWARE_PASS
 #error "ESP_FIRMWARE_PASS is not defined. Did you export the environment variable?"
@@ -108,12 +108,13 @@ enum MotorRotate {
 struct ColorPoint { float temp; uint8_t r, g, b; };
 
 ColorPoint palette[] = {
+    {10.0, 255, 255, 255},   // White
     {15.0, 0, 255, 255},     // Cyan
     {20.0, 0, 0, 255},       // Deep Blue
     {25.0, 255, 0, 176},     // Pink
     {30.0, 255, 44, 0},      // Orange
     {35.0, 255, 255, 0},      // Yellow
-    {40.0, 255, 255, 255  }   // White
+    {40.0, 255, 255, 255}   // White
 };
 
 // --- DYNAMIC LUT CONFIGURATION ---
@@ -239,7 +240,7 @@ void playStatusChord(bool isUp) {
     if (prepareForFlash) return; 
     
     int indicesUp[]   = {0, 2, 4};       
-    int indicesDown[] = {6, 3, 1}; 
+    int indicesDown[] = {6, 5, 4}; 
     
     for(int i = 0; i < 3; i++) {
         if (prepareForFlash) break; 
@@ -465,9 +466,65 @@ float smoothTemp = -100;
 
 void ledDrawSecond() {
     uint8_t baseR, baseG, baseB;
-    getTemperatureRGB(currentTemp - 5, baseR, baseG, baseB);
-    int secPos = ((59 - currentSec) * (NUM_PIXELS - 1)) / 59;
-    strip.setPixelColor(secPos, strip.Color((uint8_t)baseR, (uint8_t)baseG, (uint8_t)baseB));
+    getTemperatureRGB(currentTemp - 7, baseR, baseG, baseB);
+
+    // 1. Calculate fractional seconds for smooth movement
+    static int lastSec = -1;
+    static uint32_t lastSecMillis = 0;
+
+    // Detect exactly when the second ticks over to sync our sub-second timer
+    if (currentSec != lastSec) {
+        lastSec = currentSec;
+        lastSecMillis = millis();
+    }
+
+    // Calculate milliseconds since the second started (cap at 999 just in case of lag)
+    uint32_t msOffset = millis() - lastSecMillis;
+    if (msOffset > 999) msOffset = 999;
+
+    // exactSec goes smoothly from 0.000 to 59.999
+    float exactSec = currentSec + (msOffset / 1000.0);
+
+    // 2. Map time to a floating-point pixel position
+    // We divide by 60.0 now because continuous time spans a full 60 seconds
+    float exactPos = (NUM_PIXELS - 1) - (exactSec * (NUM_PIXELS - 1) / 60.0);
+
+    // Determine the two adjacent integer pixels we are cross-fading between
+    int pos0 = (int)exactPos; // The pixel below
+    int pos1 = pos0 + 1;      // The pixel above
+
+    // Calculate how heavily to weight the upper pixel (0.0 to 1.0)
+    float fraction = exactPos - pos0; 
+    
+    // Safety clamp for the edge
+    if (pos1 >= NUM_PIXELS) pos1 = NUM_PIXELS - 1;
+
+    // Weighting inverted for reverse movement
+    float weight0 = 1.0 - fraction;
+    float weight1 = fraction;
+
+    // 3. Additive Blending Lambda: Adds the indicator color ON TOP of the background wave
+    auto blendPixel = [&](int pos, float weight) {
+        // If the pixel is "too far" (contributes less than 5% brightness), skip it entirely
+        if (weight < 0.05) return; 
+
+        // Fetch whatever the background wave just drew here
+        uint32_t bg = strip.getPixelColor(pos);
+        uint8_t bgR = (bg >> 16) & 0xFF;
+        uint8_t bgG = (bg >> 8)  & 0xFF;
+        uint8_t bgB = bg         & 0xFF;
+
+        // Add the scaled temperature color, capped at 255
+        uint8_t outR = min(255, (int)(bgR + (baseR * weight)));
+        uint8_t outG = min(255, (int)(bgG + (baseG * weight)));
+        uint8_t outB = min(255, (int)(bgB + (baseB * weight)));
+
+        strip.setPixelColor(pos, strip.Color(outR, outG, outB));
+    };
+
+    // Draw the two blended pixels
+    blendPixel(pos0, weight0);
+    blendPixel(pos1, weight1);
 }
 
 void ledDrawTemperature() {
@@ -915,28 +972,31 @@ void loop() {
 
     currentTemp = bme.temperature;
 
-    String tags = "|#family:esp32";
-    char packet[256];
-    
-    snprintf(packet, sizeof(packet), 
-             "esp32.wifi_rssi:%d|g%s\n"
-             "esp32.cycle:%lu|g%s\n"
-             "esp32.uptime:%.2f|g%s\n"
-             "esp32.temperature:%.2f|g%s\n"
-             "esp32.humidity:%.2f|g%s\n"
-             "esp32.pressure:%.2f|g%s\n"
-             "esp32.gas:%.2f|g%s",
-             abs(WiFi.RSSI()), tags.c_str(),
-             ++cycle, tags.c_str(),
-             log(cycle) * 10000.0, tags.c_str(),
-             bme.temperature, tags.c_str(),
-             bme.humidity, tags.c_str(),
-             bme.pressure / 133.322, tags.c_str(),
-             bme.gas_resistance / 1000.0, tags.c_str());
 
-    udp.beginPacket(statsd_ip, statsd_port);
-    udp.print(packet);
-    udp.endPacket();
+    if (millis() > 60000) {
+        String tags = "|#family:esp32";
+        char packet[512];
+        
+        snprintf(packet, sizeof(packet), 
+                "esp32.rotatotron.wifi_rssi:%d|g%s\n"
+                "esp32.cycle:%lu|g%s\n"
+                "esp32.uptime:%.4f|g%s\n"
+                "esp32.temperature:%.4f|g%s\n"
+                "esp32.humidity:%.4f|g%s\n"
+                "esp32.pressure:%.4f|g%s\n"
+                "esp32.gas:%.4f|g%s",
+                abs(WiFi.RSSI()), tags.c_str(),
+                ++cycle, tags.c_str(),
+                log(cycle) * 10000.0, tags.c_str(),
+                bme.temperature, tags.c_str(),
+                bme.humidity, tags.c_str(),
+                bme.pressure / 133.322, tags.c_str(),
+                bme.gas_resistance / 1000.0, tags.c_str());
+
+        udp.beginPacket(statsd_ip, statsd_port);
+        udp.print(packet);
+        udp.endPacket();
+    }
     
     ledOff();
     LOG_PRINTF("tick %lu temp: %f\n", cycle, bme.temperature);
