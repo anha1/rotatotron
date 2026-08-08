@@ -140,21 +140,6 @@ const uint8_t DIGIT_MAP[10] = {
     0x6F  // 9: TL, TM, TR, MM, BR, BM (both set)
 };
 
-void shiftByteMSB(uint8_t byteData, bool showTransition) {
-
-    // Shift MSB first (Bit 7 down to Bit 0)
-    for (int i = 7; i >= 0; i--) {
-        digitalWrite(DIO_PIN, (byteData & (1 << i)) ? HIGH : LOW);
-        
-        // Clock pulse (shifts bit and latches previous state on shared pin)
-        digitalWrite(CLK_PIN, HIGH);
-        digitalWrite(CLK_PIN, LOW);
-        if (showTransition) {
-            delay(50);
-        }
-    }
-}
-
 // The heavy interpolation function (Used ONLY during setup)
 void calculateTemperatureRGB(float t, uint8_t &r, uint8_t &g, uint8_t &b) {
     int numPoints = sizeof(palette) / sizeof(palette[0]);
@@ -682,31 +667,49 @@ void motorRotate(MotorRotate mode) {
     }
 }
 
+uint32_t previousFrame = 0;
 
 void displayTime(int hours, int minutes, bool showColon, bool showTransition) {
-    int d1_val = hours / 10;
-    int d2_val = hours % 10;
-    int d3_val = minutes / 10;
-    int d4_val = minutes % 10;
+    uint8_t b1 = DIGIT_MAP[hours / 10];
+    uint8_t b2 = DIGIT_MAP[hours % 10] | (showColon ? (1 << 7) : 0);
+    uint8_t b3 = DIGIT_MAP[minutes / 10] | (showColon ? (1 << 7) : 0);
+    uint8_t b4 = DIGIT_MAP[minutes % 10];
 
-    uint8_t b1 = DIGIT_MAP[d1_val];
-    uint8_t b2 = DIGIT_MAP[d2_val];
-    if (showColon) b2 |= (1 << 7); // Top Colon Dot
+    // Pack into 32-bit integer: b4 in MSB gets shifted out first
+    uint32_t frame = ((uint32_t)b4 << 24) |
+                     ((uint32_t)b3 << 16) |
+                     ((uint32_t)b2 << 8)  |
+                     b1;
 
-    uint8_t b3 = DIGIT_MAP[d3_val];
-    if (showColon) b3 |= (1 << 7); // Bottom Colon Dot
+    // Find smallest number of bits to push (k = 0..32)
+    // Use k += 8 if you only want byte-aligned reuse
+    int bitsToPush = 32;
+    for (int k = 0; k <= 32; k++) {
+        uint32_t mask = (k == 32) ? 0 : (uint32_t)((1ULL << (32 - k)) - 1);
+        if ((previousFrame & mask) == (frame >> k)) {
+            bitsToPush = k;
+            break;
+        }
+    }
 
-    uint8_t b4 = DIGIT_MAP[d4_val];
+    for (int i = bitsToPush - 1; i >= 0; i--) {
+        digitalWrite(DIO_PIN, (frame & (1UL << i)) ? HIGH : LOW);
+        
+        // Clock pulse (shifts bit and latches previous state on shared pin)
+        digitalWrite(CLK_PIN, HIGH);
+        digitalWrite(CLK_PIN, LOW);
+        if (showTransition) {
+            delay(50);
+        }
+    }
 
-    // Push Digit 4 first so it reaches the last register in the chain
-    shiftByteMSB(b4, showTransition);
-    shiftByteMSB(b3, showTransition);
-    shiftByteMSB(b2, showTransition);
-    shiftByteMSB(b1, showTransition);
+    previousFrame = frame;
 
-    // 33rd clock pulse to latch final bit onto physical outputs
-    digitalWrite(CLK_PIN, HIGH);
-    digitalWrite(CLK_PIN, LOW);
+    // Latch final bit onto physical outputs only if data was clocked
+    if (bitsToPush > 0) {
+        digitalWrite(CLK_PIN, HIGH);
+        digitalWrite(CLK_PIN, LOW);
+    }
 }
 
 int prevMinutes = -1;
