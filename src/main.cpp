@@ -18,7 +18,7 @@
 #include <vector>
 #include <esp_sntp.h>
 #include <TelnetStream.h>
-#include <TM1637Display.h>
+//#include <TM1637Display.h>
 
 #include "/home/user/git/secrets/secrets.h" // Local credentials (ignored by Git)
 
@@ -73,7 +73,7 @@ SemaphoreHandle_t configMutex;
 SemaphoreHandle_t buzzerMutex;
 QueueHandle_t motorStateQueue;
 
-TM1637Display display(CLK_PIN, DIO_PIN);
+//TM1637Display display(CLK_PIN, DIO_PIN);
 
 unsigned long cycle = 0;
 
@@ -125,6 +125,35 @@ const float LUT_RESOLUTION = 0.1f; // Tweak this anytime
 float LUT_MIN_TEMP = 0.0f;
 int LUT_SIZE = 0;
 float LUT_INV_RES = 0.0f; 
+
+// Custom segment mapping (Bits 0..6)
+const uint8_t DIGIT_MAP[10] = {
+    0x77, // 0: TL, TM, TR, BL, BR, BM (both set)
+    0x24, // 1: TR, BR (neither set)
+    0x5D, // 2: TM (bit 0), TR (bit 2), MM (bit 3), BL (bit 4), BM (bit 6)
+    0x6D, // 3: TM (bit 0), TR (bit 2), MM (bit 3), BR (bit 5), BM (bit 6)
+    0x2E, // 4: TL (bit 1), TR (bit 2), MM (bit 3), BR (bit 5)
+    0x6B, // 5: TL, TM, MM, BR, BM (both set)
+    0x7B, // 6: TL, TM, MM, BL, BR, BM (both set)
+    0x25, // 7: TM (bit 0), TR (bit 2), BR (bit 5)
+    0x7F, // 8: All segments
+    0x6F  // 9: TL, TM, TR, MM, BR, BM (both set)
+};
+
+void shiftByteMSB(uint8_t byteData, bool showTransition) {
+
+    // Shift MSB first (Bit 7 down to Bit 0)
+    for (int i = 7; i >= 0; i--) {
+        digitalWrite(DIO_PIN, (byteData & (1 << i)) ? HIGH : LOW);
+        
+        // Clock pulse (shifts bit and latches previous state on shared pin)
+        digitalWrite(CLK_PIN, HIGH);
+        digitalWrite(CLK_PIN, LOW);
+        if (showTransition) {
+            delay(50);
+        }
+    }
+}
 
 // The heavy interpolation function (Used ONLY during setup)
 void calculateTemperatureRGB(float t, uint8_t &r, uint8_t &g, uint8_t &b) {
@@ -653,9 +682,41 @@ void motorRotate(MotorRotate mode) {
     }
 }
 
+
+void displayTime(int hours, int minutes, bool showColon, bool showTransition) {
+    int d1_val = hours / 10;
+    int d2_val = hours % 10;
+    int d3_val = minutes / 10;
+    int d4_val = minutes % 10;
+
+    uint8_t b1 = DIGIT_MAP[d1_val];
+    uint8_t b2 = DIGIT_MAP[d2_val];
+    if (showColon) b2 |= (1 << 7); // Top Colon Dot
+
+    uint8_t b3 = DIGIT_MAP[d3_val];
+    if (showColon) b3 |= (1 << 7); // Bottom Colon Dot
+
+    uint8_t b4 = DIGIT_MAP[d4_val];
+
+    // Push Digit 4 first so it reaches the last register in the chain
+    shiftByteMSB(b4, showTransition);
+    shiftByteMSB(b3, showTransition);
+    shiftByteMSB(b2, showTransition);
+    shiftByteMSB(b1, showTransition);
+
+    // 33rd clock pulse to latch final bit onto physical outputs
+    digitalWrite(CLK_PIN, HIGH);
+    digitalWrite(CLK_PIN, LOW);
+}
+
+int prevMinutes = -1;
+
 void segmentTask(void *pvParameters) {
     // Zero out the pulse array initially
     struct tm timeinfo;
+    
+    int i = 0;
+
 
     while(true) {
         if (!getLocalTime(&timeinfo)) {
@@ -669,14 +730,16 @@ void segmentTask(void *pvParameters) {
         currentSec = timeinfo.tm_sec;
 
         // Combine into a 4-digit integer (e.g., 14:05 becomes 1405)
-        int displayTime = (hours * 100) + minutes;
-
-        uint8_t colonMask =  0x40; //(currentSec % 2 == 0) ? 0x40 : 0x00;
-
+        //int displayTime = (hours * 100) + minutes;
+        //uint8_t colonMask =  0x40; //(currentSec % 2 == 0) ? 0x40 : 0x00;
         // Push to display: value, dot bitmask, enable leading zeros (so 4:05 AM shows as 04:05), length, position
-        display.showNumberDecEx(displayTime, colonMask, true, 4, 0);
+        //display.showNumberDecEx(displayTime, colonMask, true, 4, 0);
 
-        vTaskDelay(pdMS_TO_TICKS(900)); 
+        if (prevMinutes != minutes) {
+            prevMinutes = minutes;
+            displayTime(hours, minutes, true, true);
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000)); 
     }
 }
 
@@ -764,6 +827,9 @@ void initHardware() {
     
     pinMode(PIN_RIGHT, OUTPUT);
     pinMode(PIN_LEFT, OUTPUT);
+    pinMode(CLK_PIN, OUTPUT);
+    pinMode(DIO_PIN, OUTPUT);
+
     digitalWrite(PIN_RIGHT, LOW);
     digitalWrite(PIN_LEFT, LOW);
     
@@ -773,7 +839,7 @@ void initHardware() {
     pinMode(STATUS_LED, OUTPUT);
     ledOn();
 
-    display.setBrightness(0x0f);
+    //display.setBrightness(0x0f);
 
     
     showProgress(0);
