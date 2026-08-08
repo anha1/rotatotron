@@ -675,44 +675,50 @@ void displayTime(int hours, int minutes, bool showColon, bool showTransition) {
     uint8_t b3 = DIGIT_MAP[minutes / 10] | (showColon ? (1 << 7) : 0);
     uint8_t b4 = DIGIT_MAP[minutes % 10];
 
+    uint32_t signalDelay = 3;
+
     // Pack into 32-bit integer: b4 in MSB gets shifted out first
-    uint32_t frame = ((uint32_t)b4 << 24) |
+    uint32_t currentFrame = ((uint32_t)b4 << 24) |
                      ((uint32_t)b3 << 16) |
                      ((uint32_t)b2 << 8)  |
                      b1;
 
     // Find smallest number of bits to push (k = 0..32)
-    // Use k += 8 if you only want byte-aligned reuse
-    int bitsToPush = 32;
-    for (int k = 0; k <= 32; k++) {
-        uint32_t mask = (k == 32) ? 0 : (uint32_t)((1ULL << (32 - k)) - 1);
-        if ((previousFrame & mask) == (frame >> k)) {
+    uint32_t bitsToPush = 32;
+    for (uint32_t k = 0; k < 32; ++k) {
+        if (((previousFrame << k) ^ currentFrame) >> k == 0) {
             bitsToPush = k;
             break;
         }
     }
 
-    for (int i = bitsToPush - 1; i >= 0; i--) {
-        digitalWrite(DIO_PIN, (frame & (1UL << i)) ? HIGH : LOW);
-        
-        // Clock pulse (shifts bit and latches previous state on shared pin)
-        digitalWrite(CLK_PIN, HIGH);
-        digitalWrite(CLK_PIN, LOW);
-        if (showTransition) {
-            delay(50);
-        }
-    }
-
-    previousFrame = frame;
-
-    // Latch final bit onto physical outputs only if data was clocked
     if (bitsToPush > 0) {
-        digitalWrite(CLK_PIN, HIGH);
+        uint8_t delay_factor = 42;
+        for (int i = bitsToPush - 1; i >= 0; i--) {
+            
+            digitalWrite(DIO_PIN, (currentFrame & (1UL << i)) ? HIGH : LOW);
+            
+            // Clock pulse (shifts bit and latches previous state on shared pin)
+            digitalWrite(CLK_PIN, HIGH);
+            delay(3);
+            digitalWrite(CLK_PIN, LOW);
+            if (showTransition) {
+                delay_factor--;
+                delay(delay_factor * 3 + 33);
+            } else {
+                delay(signalDelay);
+            }
+        }
+
+        previousFrame = currentFrame;
+
+        // Latch final bit onto physical outputs only if data was clocked
+        digitalWrite(CLK_PIN, HIGH); 
+        delay(signalDelay);
         digitalWrite(CLK_PIN, LOW);
+        delay(signalDelay);
     }
 }
-
-int prevMinutes = -1;
 
 void segmentTask(void *pvParameters) {
     // Zero out the pulse array initially
@@ -738,10 +744,9 @@ void segmentTask(void *pvParameters) {
         // Push to display: value, dot bitmask, enable leading zeros (so 4:05 AM shows as 04:05), length, position
         //display.showNumberDecEx(displayTime, colonMask, true, 4, 0);
 
-        if (prevMinutes != minutes) {
-            prevMinutes = minutes;
-            displayTime(hours, minutes, true, true);
-        }
+     
+        displayTime(hours, minutes, true, true);
+        
         vTaskDelay(pdMS_TO_TICKS(1000)); 
     }
 }
