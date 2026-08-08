@@ -675,7 +675,7 @@ void displayTime(int hours, int minutes, bool showColon, bool showTransition) {
     uint8_t b3 = DIGIT_MAP[minutes / 10] | (showColon ? (1 << 7) : 0);
     uint8_t b4 = DIGIT_MAP[minutes % 10];
 
-    uint32_t signalDelay = 3;
+    uint32_t signalDelay = 1;
 
     // Pack into 32-bit integer: b4 in MSB gets shifted out first
     uint32_t currentFrame = ((uint32_t)b4 << 24) |
@@ -685,10 +685,12 @@ void displayTime(int hours, int minutes, bool showColon, bool showTransition) {
 
     // Find smallest number of bits to push (k = 0..32)
     uint32_t bitsToPush = 32;
-    for (uint32_t k = 0; k < 32; ++k) {
-        if (((previousFrame << k) ^ currentFrame) >> k == 0) {
-            bitsToPush = k;
-            break;
+    if (previousFrame != 0) {
+        for (uint32_t k = 0; k < 32; ++k) {
+            if (((previousFrame << k) ^ currentFrame) >> k == 0) {
+                bitsToPush = k;
+                break;
+            }
         }
     }
 
