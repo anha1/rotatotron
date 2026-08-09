@@ -675,38 +675,24 @@ void displayTime(int hours, int minutes, bool showColon, bool showTransition) {
     uint8_t b3 = DIGIT_MAP[minutes / 10] | (showColon ? (1 << 7) : 0);
     uint8_t b4 = DIGIT_MAP[minutes % 10];
 
-    uint32_t signalDelay = 1;
+    uint8_t signalDelay = 1;
 
-    // Pack into 32-bit integer: b4 in MSB gets shifted out first
     uint32_t currentFrame = ((uint32_t)b4 << 24) |
                      ((uint32_t)b3 << 16) |
                      ((uint32_t)b2 << 8)  |
                      b1;
 
-    // Find smallest number of bits to push (k = 0..32)
-    uint32_t bitsToPush = 32;
-    if (previousFrame != 0) {
-        for (uint32_t k = 0; k < 32; ++k) {
-            if (((previousFrame << k) ^ currentFrame) >> k == 0) {
-                bitsToPush = k;
-                break;
-            }
-        }
-    }
-
-    if (bitsToPush > 0) {
-        uint8_t delay_factor = 42;
-        for (int i = bitsToPush - 1; i >= 0; i--) {
+    if (previousFrame == 0 || previousFrame != currentFrame) {
+        for (int i = 31; i >= 0; i--) {
             
             digitalWrite(DIO_PIN, (currentFrame & (1UL << i)) ? HIGH : LOW);
             
             // Clock pulse (shifts bit and latches previous state on shared pin)
             digitalWrite(CLK_PIN, HIGH);
-            delay(3);
+            delay(signalDelay);
             digitalWrite(CLK_PIN, LOW);
             if (showTransition) {
-                delay_factor--;
-                delay(delay_factor * 3 + 33);
+                delay(i * 3 + 33);
             } else {
                 delay(signalDelay);
             }
