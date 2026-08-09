@@ -692,7 +692,7 @@ void displayTime(int hours, int minutes, bool showColon, bool showTransition) {
             delay(signalDelay);
             digitalWrite(CLK_PIN, LOW);
             if (showTransition) {
-                delay(i * 3 + 33);
+                delay(i * 5 + 1);
             } else {
                 delay(signalDelay);
             }
@@ -733,7 +733,7 @@ void segmentTask(void *pvParameters) {
         //display.showNumberDecEx(displayTime, colonMask, true, 4, 0);
 
      
-        displayTime(hours, minutes, true, true);
+        displayTime(hours, minutes, false, true);
         
         vTaskDelay(pdMS_TO_TICKS(1000)); 
     }
@@ -746,26 +746,15 @@ void motorTask(void *pvParameters) {
     for (;;) {
         if (prepareForFlash) vTaskSuspend(NULL); 
 
-        if (isMotorPanic()) {
-            motorRotate(ROTATE_RIGHT);
-            motorRegularOrPanicWait(0); 
-            motorRotate(ROTATE_IDLE);
-            motorRegularOrPanicWait(0);
-        } else {
-            motorRotate(ROTATE_LEFT);
-            motorRegularOrPanicWait(20000); 
-            motorRotate(ROTATE_RIGHT);
-            motorRegularOrPanicWait(3000); 
-            motorRotate(ROTATE_IDLE);
-            motorRegularOrPanicWait(90000); 
+        motorRotate(ROTATE_LEFT);
+        vTaskDelay(pdMS_TO_TICKS(26000));
+        motorRotate(ROTATE_IDLE);
+        vTaskDelay(pdMS_TO_TICKS(120000));
 
-            motorRotate(ROTATE_RIGHT);
-            motorRegularOrPanicWait(20000); 
-            motorRotate(ROTATE_LEFT);
-            motorRegularOrPanicWait(3000); 
-            motorRotate(ROTATE_IDLE);
-            motorRegularOrPanicWait(90000);
-        } 
+        motorRotate(ROTATE_RIGHT);
+        vTaskDelay(pdMS_TO_TICKS(26000));
+        motorRotate(ROTATE_IDLE);
+        vTaskDelay(pdMS_TO_TICKS(120000));
     }
 }
 
