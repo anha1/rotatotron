@@ -140,6 +140,14 @@ const uint8_t DIGIT_MAP[10] = {
     0x6F  // 9: TL, TM, TR, MM, BR, BM (both set)
 };
 
+// Degree symbol (top square: TM, TL, TR, MM)
+// Bits: 0, 1, 2, 3 -> (0x01 | 0x02 | 0x04 | 0x08)
+const uint8_t CHAR_DEGREE = 0x0F;
+
+// Character 'C' (TM, TL, BL, BM)
+// Bits: 0, 1, 4, 6 -> (0x01 | 0x02 | 0x10 | 0x40)
+const uint8_t CHAR_C = 0x53;
+
 // The heavy interpolation function (Used ONLY during setup)
 void calculateTemperatureRGB(float t, uint8_t &r, uint8_t &g, uint8_t &b) {
     int numPoints = sizeof(palette) / sizeof(palette[0]);
@@ -669,18 +677,17 @@ void motorRotate(MotorRotate mode) {
 
 uint32_t previousFrame = 0;
 
-void displayTime(int hours, int minutes, bool showColon, bool showTransition) {
-    uint8_t b1 = DIGIT_MAP[hours / 10];
-    uint8_t b2 = DIGIT_MAP[hours % 10] | (showColon ? (1 << 7) : 0);
-    uint8_t b3 = DIGIT_MAP[minutes / 10] | (showColon ? (1 << 7) : 0);
-    uint8_t b4 = DIGIT_MAP[minutes % 10];
-
-    uint8_t signalDelay = 1;
-
-    uint32_t currentFrame = ((uint32_t)b4 << 24) |
+uint32_t bitsToFrame(uint8_t b1, uint8_t b2, uint8_t b3, uint8_t b4) {
+    return ((uint32_t)b4 << 24) |
                      ((uint32_t)b3 << 16) |
                      ((uint32_t)b2 << 8)  |
                      b1;
+}
+
+void displayFrame(uint32_t currentFrame,  bool showTransition) {
+
+    uint8_t signalDelay = 0;
+
 
     if (previousFrame == 0 || previousFrame != currentFrame) {
         for (int i = 31; i >= 0; i--) {
@@ -692,7 +699,9 @@ void displayTime(int hours, int minutes, bool showColon, bool showTransition) {
             delay(signalDelay);
             digitalWrite(CLK_PIN, LOW);
             if (showTransition) {
-                delay(i * 5 + 1);
+                int delayMs = i * 6;
+                if (delayMs < 50) delayMs = 50;
+                delay(delayMs);
             } else {
                 delay(signalDelay);
             }
@@ -706,6 +715,22 @@ void displayTime(int hours, int minutes, bool showColon, bool showTransition) {
         digitalWrite(CLK_PIN, LOW);
         delay(signalDelay);
     }
+}
+
+void displayTemperature(int temperature, bool showTransition) {
+    uint8_t b1 = DIGIT_MAP[temperature / 10];
+    uint8_t b2 = DIGIT_MAP[temperature % 10];
+    uint8_t b3 = CHAR_DEGREE;
+    uint8_t b4 = CHAR_C;
+    displayFrame(bitsToFrame(b1, b2, b3, b4), showTransition);
+}
+
+void displayTime(int hours, int minutes, bool showColon,  bool showTransition) {
+    uint8_t b1 = DIGIT_MAP[hours / 10];
+    uint8_t b2 = DIGIT_MAP[hours % 10] | (showColon ? (1 << 7) : 0);
+    uint8_t b3 = DIGIT_MAP[minutes / 10] | (showColon ? (1 << 7) : 0);
+    uint8_t b4 = DIGIT_MAP[minutes % 10];
+    displayFrame(bitsToFrame(b1, b2, b3, b4), showTransition);
 }
 
 void segmentTask(void *pvParameters) {
@@ -732,8 +757,12 @@ void segmentTask(void *pvParameters) {
         // Push to display: value, dot bitmask, enable leading zeros (so 4:05 AM shows as 04:05), length, position
         //display.showNumberDecEx(displayTime, colonMask, true, 4, 0);
 
-     
-        displayTime(hours, minutes, false, true);
+        int slice = currentSec % 20;
+        if (slice >=7 && slice <= 9 ) {
+            displayTemperature(currentTemp, false);
+        } else {
+            displayTime(hours, minutes, false, currentSec < 5);
+        }
         
         vTaskDelay(pdMS_TO_TICKS(1000)); 
     }
