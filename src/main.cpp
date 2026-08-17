@@ -78,6 +78,7 @@ QueueHandle_t motorStateQueue;
 unsigned long cycle = 0;
 
 volatile float currentTemp = -100;
+volatile float currentHumidity = 0;
 volatile int currentSec = 0;
 volatile float spikeFactor = 1.0; // 1.0 broad,  20.0 spiky
 volatile bool prepareForFlash = false; // Flash-mode safety flag
@@ -142,11 +143,14 @@ const uint8_t DIGIT_MAP[10] = {
 
 // Degree symbol (top square: TM, TL, TR, MM)
 // Bits: 0, 1, 2, 3 -> (0x01 | 0x02 | 0x04 | 0x08)
-const uint8_t CHAR_DEGREE = 0x0F;
+const uint8_t CHAR_TOP_SQUARE = 0x0F;
+const uint8_t CHAR_BOTTOM_SQUARE = 0x78;
 
 // Character 'C' (TM, TL, BL, BM)
-// Bits: 0, 1, 4, 6 -> (0x01 | 0x02 | 0x10 | 0x40)
 const uint8_t CHAR_C = 0x53;
+
+const uint8_t CHAR_PERCENT_LEFT = 0x2F;
+const uint8_t CHAR_PERCENT_RIGHT = 0x7A;
 
 // The heavy interpolation function (Used ONLY during setup)
 void calculateTemperatureRGB(float t, uint8_t &r, uint8_t &g, uint8_t &b) {
@@ -720,8 +724,16 @@ void displayFrame(uint32_t currentFrame,  bool showTransition) {
 void displayTemperature(int temperature, bool showTransition) {
     uint8_t b1 = DIGIT_MAP[temperature / 10];
     uint8_t b2 = DIGIT_MAP[temperature % 10];
-    uint8_t b3 = CHAR_DEGREE;
+    uint8_t b3 = CHAR_TOP_SQUARE;
     uint8_t b4 = CHAR_C;
+    displayFrame(bitsToFrame(b1, b2, b3, b4), showTransition);
+}
+
+void displayHumidity(int humidity, bool showTransition) {
+    uint8_t b1 = DIGIT_MAP[humidity / 10];
+    uint8_t b2 = DIGIT_MAP[humidity % 10];
+    uint8_t b3 = CHAR_PERCENT_LEFT;
+    uint8_t b4 = CHAR_BOTTOM_SQUARE;
     displayFrame(bitsToFrame(b1, b2, b3, b4), showTransition);
 }
 
@@ -757,9 +769,12 @@ void segmentTask(void *pvParameters) {
         // Push to display: value, dot bitmask, enable leading zeros (so 4:05 AM shows as 04:05), length, position
         //display.showNumberDecEx(displayTime, colonMask, true, 4, 0);
 
-        int slice = currentSec % 20;
-        if (slice >=7 && slice <= 9 ) {
+        int slice = currentSec % 30;
+
+        if (slice >= 8 && slice <= 10) {
             displayTemperature(currentTemp, false);
+        } else if (slice >= 19 && slice <= 21) {
+            displayHumidity(currentHumidity, false);
         } else {
             displayTime(hours, minutes, false, currentSec < 5);
         }
@@ -1051,6 +1066,7 @@ void loop() {
     }
 
     currentTemp = bme.temperature;
+    currentHumidity = bme.humidity;
 
 
     if (millis() > 60000) {
